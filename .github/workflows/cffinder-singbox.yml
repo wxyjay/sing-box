@@ -1,0 +1,101 @@
+name: CFFinder sing-box core
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        default: "latest"
+      force:
+        type: boolean
+        default: false
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            libc: glibc
+          - arch: arm64
+            libc: glibc
+          - arch: amd64
+            libc: musl
+          - arch: arm64
+            libc: musl
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Resolve version
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version || 'latest' }}
+        run: |
+          if [ "$INPUT_VERSION" = "latest" ]; then
+            TAG="$(gh release view --repo SagerNet/sing-box --json tagName -q .tagName)"
+          else
+            TAG="$INPUT_VERSION"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout upstream tag
+        run: |
+          git remote add upstream https://github.com/SagerNet/sing-box.git || true
+          git fetch upstream "refs/tags/${{ steps.ver.outputs.tag }}:refs/tags/${{ steps.ver.outputs.tag }}"
+          git checkout "${{ steps.ver.outputs.tag }}"
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          TAGS: "with_quic with_grpc with_dhcp with_wireguard with_utls with_acme with_clash_api with_v2ray_api with_gvisor with_tailscale with_ccm with_ocm badlinkname tfogo_checklinkname0"
+        run: |
+          PKG="sing-box-${{ steps.ver.outputs.version }}-linux-${{ matrix.arch }}-${{ matrix.libc }}"
+          mkdir -p "dist/$PKG"
+          LDFLAGS="$(cat release/LDFLAGS 2>/dev/null || true) -s -w"
+          go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" -o "dist/$PKG/sing-box" ./cmd/sing-box
+          "dist/$PKG/sing-box" version
+          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ matrix.arch }}-${{ matrix.libc }}
+          path: dist/*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > sha256sums.txt
+          TAG="${{ github.event.inputs.version }}"
+          if [ -z "$TAG" ] || [ "$TAG" = "latest" ]; then
+            TAG="$(gh release view --repo SagerNet/sing-box --json tagName -q .tagName)"
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 && gh release upload "$TAG" * --clobber || gh release create "$TAG" * --title "$TAG CFFinder build" --notes "CFFinder custom sing-box build with with_v2ray_api."
