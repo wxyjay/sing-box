@@ -4,9 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
+        description: "Upstream sing-box tag, e.g. v1.13.12 or latest"
         required: true
         default: "latest"
       force:
+        description: "Overwrite existing release assets"
         type: boolean
         default: false
   schedule:
@@ -14,6 +16,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -32,11 +37,13 @@ jobs:
             libc: musl
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout fork
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
           go-version: stable
 
@@ -51,6 +58,7 @@ jobs:
           else
             TAG="$INPUT_VERSION"
           fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
@@ -69,12 +77,26 @@ jobs:
         run: |
           PKG="sing-box-${{ steps.ver.outputs.version }}-linux-${{ matrix.arch }}-${{ matrix.libc }}"
           mkdir -p "dist/$PKG"
+
           LDFLAGS="$(cat release/LDFLAGS 2>/dev/null || true) -s -w"
-          go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" -o "dist/$PKG/sing-box" ./cmd/sing-box
-          "dist/$PKG/sing-box" version
+
+          go build \
+            -trimpath \
+            -tags "$TAGS" \
+            -ldflags "$LDFLAGS" \
+            -o "dist/$PKG/sing-box" \
+            ./cmd/sing-box
+
+          file "dist/$PKG/sing-box"
+
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            "dist/$PKG/sing-box" version
+          fi
+
           tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
           name: sing-box-${{ matrix.arch }}-${{ matrix.libc }}
           path: dist/*.tar.gz
@@ -82,20 +104,51 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Prepare checksums
         run: |
           cd artifacts
           sha256sum *.tar.gz > sha256sums.txt
-          TAG="${{ github.event.inputs.version }}"
-          if [ -z "$TAG" ] || [ "$TAG" = "latest" ]; then
+          ls -lh
+
+      - name: Resolve release tag
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version || 'latest' }}
+        run: |
+          if [ "$INPUT_VERSION" = "latest" ]; then
             TAG="$(gh release view --repo SagerNet/sing-box --json tagName -q .tagName)"
+          else
+            TAG="$INPUT_VERSION"
           fi
-          gh release view "$TAG" >/dev/null 2>&1 && gh release upload "$TAG" * --clobber || gh release create "$TAG" * --title "$TAG CFFinder build" --notes "CFFinder custom sing-box build with with_v2ray_api."
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          cd artifacts
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$FORCE" = "true" ]; then
+              gh release upload "$TAG" * --clobber
+            else
+              echo "Release $TAG already exists. Use force=true to overwrite assets."
+              exit 0
+            fi
+          else
+            gh release create "$TAG" * \
+              --title "$TAG CFFinder build" \
+              --notes "CFFinder custom sing-box build with with_v2ray_api."
+          fi
