@@ -62,8 +62,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.resolve.outputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -175,19 +176,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.resolve.outputs.tag }}
           FORCE: ${{ needs.resolve.outputs.force }}
+          REPO: ${{ github.repository }}
         run: |
           cd artifacts
 
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             if [ "$FORCE" = "true" ]; then
-              gh release upload "$TAG" * --repo "$GITHUB_REPOSITORY" --clobber
+              gh release upload "$TAG" * \
+                --repo "$REPO" \
+                --clobber
             else
               echo "Release $TAG already exists; nothing to publish."
               exit 0
             fi
           else
             gh release create "$TAG" * \
-              --repo "$GITHUB_REPOSITORY" \
+              --repo "$REPO" \
               --title "$TAG CFFinder build" \
               --notes "CFFinder custom sing-box build with with_v2ray_api. Source: SagerNet/sing-box $TAG"
           fi
