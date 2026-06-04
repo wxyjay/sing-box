@@ -1,0 +1,193 @@
+name: CFFinder sing-box auto release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream sing-box tag, e.g. v1.13.12 or latest"
+        required: true
+        default: "latest"
+      force:
+        description: "Rebuild and overwrite assets even if release already exists"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: cffinder-singbox-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      exists: ${{ steps.exists.outputs.exists }}
+      force: ${{ steps.resolve.outputs.force }}
+      should_build: ${{ steps.decide.outputs.should_build }}
+
+    steps:
+      - name: Resolve upstream latest tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || 'latest' }}
+          INPUT_FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+        run: |
+          if [ "$INPUT_VERSION" = "latest" ] || [ -z "$INPUT_VERSION" ]; then
+            TAG="$(gh release view --repo SagerNet/sing-box --json tagName -q .tagName)"
+          else
+            TAG="$INPUT_VERSION"
+          fi
+
+          if [ -z "$TAG" ]; then
+            echo "Unable to resolve upstream sing-box release tag"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "force=$INPUT_FORCE" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether release already exists in this fork
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          EXISTS: ${{ steps.exists.outputs.exists }}
+          FORCE: ${{ steps.resolve.outputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EXISTS" = "true" ]; then
+            echo "Release already exists; skip build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            libc: glibc
+          - arch: arm64
+            libc: glibc
+          - arch: amd64
+            libc: musl
+          - arch: arm64
+            libc: musl
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Checkout upstream tag
+        run: |
+          git remote add upstream https://github.com/SagerNet/sing-box.git || true
+          git fetch upstream "refs/tags/${{ needs.resolve.outputs.tag }}:refs/tags/${{ needs.resolve.outputs.tag }}"
+          git checkout "${{ needs.resolve.outputs.tag }}"
+
+      - name: Build sing-box
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+          TAGS: "with_quic with_grpc with_dhcp with_wireguard with_utls with_acme with_clash_api with_v2ray_api with_gvisor with_tailscale with_ccm with_ocm badlinkname tfogo_checklinkname0"
+        run: |
+          PKG="sing-box-${{ needs.resolve.outputs.version }}-linux-${{ matrix.arch }}-${{ matrix.libc }}"
+          mkdir -p "dist/$PKG"
+
+          LDFLAGS="$(cat release/LDFLAGS 2>/dev/null || true) -s -w"
+
+          go build \
+            -trimpath \
+            -tags "$TAGS" \
+            -ldflags "$LDFLAGS" \
+            -o "dist/$PKG/sing-box" \
+            ./cmd/sing-box
+
+          file "dist/$PKG/sing-box"
+
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            "dist/$PKG/sing-box" version
+          fi
+
+          tar -C dist -czf "dist/$PKG.tar.gz" "$PKG"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ matrix.arch }}-${{ matrix.libc }}
+          path: dist/*.tar.gz
+
+  release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > sha256sums.txt
+          ls -lh
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          FORCE: ${{ needs.resolve.outputs.force }}
+        run: |
+          cd artifacts
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$FORCE" = "true" ]; then
+              gh release upload "$TAG" * --repo "$GITHUB_REPOSITORY" --clobber
+            else
+              echo "Release $TAG already exists; nothing to publish."
+              exit 0
+            fi
+          else
+            gh release create "$TAG" * \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG CFFinder build" \
+              --notes "CFFinder custom sing-box build with with_v2ray_api. Source: SagerNet/sing-box $TAG"
+          fi
