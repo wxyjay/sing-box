@@ -12,6 +12,7 @@ on:
         type: boolean
         default: false
   schedule:
+    # 每天北京时间约 11:23 检查一次；GitHub cron 使用 UTC
     - cron: "23 3 * * *"
 
 permissions:
@@ -117,8 +118,8 @@ jobs:
       - name: Checkout upstream tag
         run: |
           git remote add upstream https://github.com/SagerNet/sing-box.git || true
-          git fetch upstream "refs/tags/${{ needs.resolve.outputs.tag }}:refs/tags/${{ needs.resolve.outputs.tag }}"
-          git checkout "${{ needs.resolve.outputs.tag }}"
+          git fetch --no-tags --depth=1 upstream "refs/tags/${{ needs.resolve.outputs.tag }}"
+          git checkout --detach FETCH_HEAD
 
       - name: Build sing-box
         env:
@@ -141,6 +142,7 @@ jobs:
 
           file "dist/$PKG/sing-box"
 
+          # GitHub runner 是 amd64，不能直接执行 arm64 二进制
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             "dist/$PKG/sing-box" version
           fi
