@@ -137,18 +137,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
           FORCE: ${{ inputs.force }}
+          REPO: ${{ github.repository }}
         run: |
           cd artifacts
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             if [ "$FORCE" = "true" ]; then
-              gh release upload "$TAG" * --clobber
+              gh release upload "$TAG" * \
+                --repo "$REPO" \
+                --clobber
             else
               echo "Release $TAG already exists. Use force=true to overwrite assets."
               exit 0
             fi
           else
             gh release create "$TAG" * \
+              --repo "$REPO" \
               --title "$TAG CFFinder build" \
               --notes "CFFinder custom sing-box build with with_v2ray_api."
           fi
